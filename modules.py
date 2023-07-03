@@ -106,8 +106,8 @@ def preprocess_s1(S1_filtered,lee_filtering,filter_size,time_step):
     S1_filtered['filtered_vv'] = S1_filtered.filtered_vv.where(S1_filtered.filtered_vv!=0,np.nan)
 
     # covert to db
-    S1_filtered['filtered_vh']=10 * xr.ufuncs.log10(S1_filtered.filtered_vh)
-    S1_filtered['filtered_vv']=10 * xr.ufuncs.log10(S1_filtered.filtered_vv)
+    S1_filtered['filtered_vh']=10 * np.log10(S1_filtered.filtered_vh)
+    S1_filtered['filtered_vv']=10 * np.log10(S1_filtered.filtered_vv)
 
     S1_filtered['vv_a_vh']=S1_filtered['filtered_vv']+S1_filtered['filtered_vh']
     S1_filtered['vv_m_vh']=S1_filtered['filtered_vv']-S1_filtered['filtered_vh']
