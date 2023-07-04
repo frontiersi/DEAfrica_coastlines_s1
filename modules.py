@@ -7,12 +7,12 @@ from deafrica_tools.datahandling import load_ard, mostcommon_crs
 from deafrica_tools.bandindices import calculate_indices
 from dea_tools.coastal import model_tides, tidal_tag, pixel_tides, tidal_stats
 from deafrica_tools.dask import create_local_dask_cluster
-from coastlines.raster import tide_cutoffs,load_tidal_subset
-from coastlines.vector import points_on_line, annual_movements, calculate_regressions
+from coastlines.raster import tide_cutoffs
 
 from scipy.ndimage.filters import uniform_filter
 from scipy.ndimage.measurements import variance
 from skimage.filters import threshold_minimum, threshold_otsu
+from skimage.morphology import binary_erosion,binary_dilation,disk
 import random
 
 def lee_filter(da, size):
@@ -52,76 +52,129 @@ def filter_by_tide_height(ds,tide_centre=0.0):
     ds_filtered = ds_filtered.where(tide_bool)
     return ds_filtered
 
-def query_filter_s1(dc,query,output_crs):
-    S1_ascending=load_ard(dc=dc,
-                  products=['s1_rtc'],
-                  output_crs=output_crs,
-                  resampling='bilinear',
-                  align=(10, 10),
-                  dask_chunks={'time': 1},
-                  group_by='solar_day',
-                  dtype='native',
-                  sat_orbit_state='ascending',
-                  **query)
-    S1_descending=load_ard(dc=dc,
-                  products=['s1_rtc'],
-                  output_crs=output_crs,
-                  resampling='bilinear',
-                  align=(10, 10),
-                  dask_chunks={'time': 1},
-                  group_by='solar_day',
-                  dtype='native',
-                  sat_orbit_state='descending',
-                  **query)
-    S1_ascending["isAscending"] = xr.where(S1_ascending['mask']!=0,1,np.nan)
-    S1_ascending["isDescending"] = xr.where(S1_ascending['mask']!=0,0,np.nan)
+def load_s1_by_orbits(dc,query):
+    '''
+    Function to query and load ascending and descending Sentinel-1 data 
+    and add a variable to denote acquisition orbits
+    
+    Parameters:
+    dc: connected datacube
+    query: a query dictionary to define spatial extent, measurements, time range and spatial resolution
+    
+    Returns:
+    Queried dataset with variable 'is_ascending' added to denote orbit path
+    
+    '''
+    # load ascending data
+    print('\nQuerying and loading Sentinel-1 ascending data...')
+    ds_s1_ascending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
+                             dtype='native',sat_orbit_state='ascending',**query)
+    # add an variable denoting data source
+    ds_s1_ascending['is_ascending']=xr.DataArray(np.ones(len(ds_s1_ascending.time)),
+                                                 dims=('time'),coords={'time': ds_s1_ascending.time})
+    
+    # load descending data
+    print('\nQuerying and loading Sentinel-1 descending data...')
+    ds_s1_descending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
+                              dtype='native',sat_orbit_state='descending',**query)
+    # add an variable denoting data source
+    ds_s1_descending['is_ascending']=xr.DataArray(np.zeros(len(ds_s1_descending.time)),
+                                                  dims=('time'),coords={'time': ds_s1_descending.time})
+    
+    # merge datasets together
+    ds_s1=xr.concat([ds_s1_ascending,ds_s1_descending],dim='time').sortby('time')
+    
+    return ds_s1
 
-    S1_descending["isAscending"] = xr.where(S1_descending['mask']!=0,0,np.nan)
-    S1_descending["isDescending"] = xr.where(S1_descending['mask']!=0,1,np.nan)
+def filter_obs_by_orbit(ds_s1):
+    '''
+    Function to impliment per-pixel filtering of Sentinel-1 observations 
+    to keep only observations from the orbit (ascending/descending) with higher frequency over time. 
+    
+    Each of the Sentinel-1 observations was acquired from either a descending or ascending orbit, 
+    which has impacts on the local incidence angle and backscattering value. 
+    Here we do the filtering to minimise the effects of inconsistent looking angle and obit direction for each individual pixel.
 
-    S1=xr.concat([S1_ascending,S1_descending],dim='time')
-    ascending_mask=(S1.isAscending.sum(dim='time')>S1.isDescending.sum(dim='time'))
-    descending_mask=(S1.isAscending.sum(dim='time')<=S1.isDescending.sum(dim='time'))
-    S1=S1.where((ascending_mask&(S1.isAscending==1))|(descending_mask&(S1.isDescending==1)),np.nan)
-    # drop all-nan observations
-    S1=S1.dropna(dim='time',how='all')
-    return S1
+    Parameters:
+    ds_s1: xarray.Dataset
+        Time-series observations of Sentinel-1 data, 
+        with two required variables: 'is_ascending' denoting orbit path and 'mask' to identify acquisition exent
+    
+    Returns:
+    ds_s1_filtered: xarray.Dataset
+        Filtered dataset
+    '''
 
-def preprocess_s1(S1_filtered,lee_filtering,filter_size,time_step):
-    # The lee filter above doesn't handle null values
-    # We therefore set null values to 0 before applying the filter
-    valid = xr.ufuncs.isfinite(S1_filtered)
-    S1_filtered = S1_filtered.where(valid, 0)
+    print('\nFiltering Sentinel-1 product by orbit...')
+    cnt_ascending=((ds_s1["is_ascending"]==1)&(ds_s1['mask']!=0)).sum(dim='time')
+    cnt_descending=((ds_s1["is_ascending"]==0)&(ds_s1['mask']!=0)).sum(dim='time')
+    
+    ds_s1_filtered=ds_s1.where(((cnt_ascending>=cnt_descending)&(ds_s1["is_ascending"]==1))|
+                               ((cnt_ascending<cnt_descending)&(ds_s1["is_ascending"]==0)))
+    # remove intermediate variable
+    ds_s1_filtered=ds_s1_filtered.drop_vars(["is_ascending"])
+    # drop all-nan time steps
+    ds_s1_filtered=ds_s1_filtered.dropna(dim='time',how='all')
+    
+    return ds_s1_filtered
 
-    if lee_filtering==True: # do filtering
+def process_features_s1(ds_s1,filter_size=None,s1_orbit_filtering=True,time_step='1Y'):
+    '''
+    Function to implement preprocessing and features generation on Sentinel-1 data
+    preprocessing includes speckle filtering (optional), filtering observations by orbit (optional) and conversion to dB
+    features include annual median and std of bands/band math
+    
+    Parameters:
+    ds_s1: xarray.Dataset
+        Time-series of Sentinel-1 data, with variable 'vh' required
+    filter_size: integer or None
+        Speckle filtering size
+    s1_orbit_filtering: Boolean
+        Whether to filter Sentinel-1 observations by orbit
+    time_step: string
+        time step used to generate temporal composite
+        
+    Returns:
+        xarray.Dataset
+        Preprocessed Sentinel-1 data
+    '''
+    ds_s1_filtered=ds_s1
+    
+    # apply Lee filtering if required
+    if not filter_size is None:
+        print('Applying Lee filtering using filtering size of {} pixels...'.format(filter_size))
+        # The lee filter above doesn't handle null values
+        # We therefore set null values to 0 before applying the filter
+        ds_s1_filtered = ds_s1.where(np.isfinite(ds_s1), 0)
         # Create a new entry in dataset corresponding to filtered VV and VH data
-        S1_filtered["filtered_vh"] = S1_filtered.vh.groupby("time").apply(lee_filter, size=filter_size)
-        S1_filtered["filtered_vv"] = S1_filtered.vv.groupby("time").apply(lee_filter, size=filter_size)
-    else: # don't do filtering
-        S1_filtered["filtered_vh"]=S1_filtered["vh"]
-        S1_filtered["filtered_vv"]=S1_filtered["vv"]
+        ds_s1_filtered["vh"] = ds_s1_filtered.vh.groupby("time").apply(lee_filter, size=filter_size)
+        # Null pixels should remain null, but also including pixels changed to 0 due to the filtering
+        ds_s1_filtered['vh'] = ds_s1_filtered.vh.where(ds_s1_filtered.vh!=0,np.nan)
+    
+    # filter observations by orbit if required
+    if s1_orbit_filtering:
+        ds_s1_filtered=filter_obs_by_orbit(ds_s1_filtered)
 
-    # Null pixels should remain null
-    S1_filtered['filtered_vh'] = S1_filtered.filtered_vh.where(S1_filtered.filtered_vh!=0,np.nan)
-    S1_filtered['filtered_vv'] = S1_filtered.filtered_vv.where(S1_filtered.filtered_vv!=0,np.nan)
-
-    # covert to db
-    S1_filtered['filtered_vh']=10 * np.log10(S1_filtered.filtered_vh)
-    S1_filtered['filtered_vv']=10 * np.log10(S1_filtered.filtered_vv)
-
-    S1_filtered['vv_a_vh']=S1_filtered['filtered_vv']+S1_filtered['filtered_vh']
-    S1_filtered['vv_m_vh']=S1_filtered['filtered_vv']-S1_filtered['filtered_vh']
-    S1_filtered['vv_d_vh']=S1_filtered['filtered_vv']/S1_filtered['filtered_vh']
+    # Scale to plot data in decibels
+    ds_s1_filtered['vh'] = 10 * np.log10(ds_s1_filtered.vh)
+    ds_s1_filtered['vv'] = 10 * np.log10(ds_s1_filtered.vv)
+    
+    # generate features
+    print('Calculating features for Sentinel-1')
+    ds_s1_filtered['vv_a_vh']=ds_s1_filtered['vv']+ds_s1_filtered['vh']
+    ds_s1_filtered['vv_m_vh']=ds_s1_filtered['vv']-ds_s1_filtered['vh']
+    ds_s1_filtered['vv_d_vh']=ds_s1_filtered['vv']/ds_s1_filtered['vh']
     
     # annual composites
+    print('Generate temporal composites...')
     # median
-    ds_summaries_s1 = (S1_filtered[['filtered_vh','filtered_vv','vv_a_vh','vv_m_vh','vv_d_vh','area']]
+    ds_summaries_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','vv_d_vh','area']]
                          .resample(time=time_step)
                          .median('time')
                          .compute()
                         )
     # std
-    ds_std_s1 = (S1_filtered[['filtered_vh','filtered_vv','vv_a_vh','vv_m_vh','vv_d_vh','area']]
+    ds_std_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','vv_d_vh','area']]
                          .resample(time=time_step)
                          .std('time')
                          .compute()
@@ -129,5 +182,65 @@ def preprocess_s1(S1_filtered,lee_filtering,filter_size,time_step):
     ds_std_s1=ds_std_s1.rename({var:var+'_std' for var in list(ds_std_s1.data_vars)})
     # merge median and std
     ds_summaries_s1=xr.merge([ds_summaries_s1,ds_std_s1])
+    
     return ds_summaries_s1
 
+def create_coastal_mask(da,buffer_pixels):
+    '''
+    Create a simplified coastal zone mask based on time series of Sentinel-2 MNDWI data
+    
+    Parameters:
+    ds_summaries: xarray.DataArray
+        Time series of Sentinel-2 MNDWI data
+    buffer_pixels: integer
+        Number of pixels to buffer coastal zone
+    
+    Returns:
+    coastal_mask: xarray.DataArray 
+        A single time buffered coastal zone mask (0: non-coastal and 1: coastal)
+    '''
+    print('\nCalculating simplified coastal zone mask...')
+    # apply thresholding and re-apply nodata values
+    nodata = da.isnull()
+    thresholded_ds = da>=0
+    thresholded_ds = thresholded_ds.where(~nodata)
+    # use 20% ~ 80% wet frequency to identify potential coastal zone
+    coastal_mask=(thresholded_ds.mean(dim='time') >= 0.2)&(thresholded_ds.mean(dim='time') <= 0.8)
+    # buffering
+    print('\nApplying buffering of {} Sentinel-2 pixels (parameter buffer_pixels)...'.format(buffer_pixels))
+    coastal_mask=xr.apply_ufunc(binary_dilation,coastal_mask.compute(),disk(buffer_pixels))
+    return coastal_mask
+
+def collect_training_samples(S2_filtered,ds_summaries_s1,time_step):
+    print('\nCollecting water/non-water samples...')
+    # median of S2
+    ds_summaries_s2 = (S2_filtered[['MNDWI']]
+                    .resample(time=time_step)
+                    .median('time')
+                    .compute()
+                        )
+    # classs: water (1) and land (0)
+    # excluding pixels that are almost always water (wet frequency >0.8) or land (wet frequeny <0.2)
+    coastal_mask=create_coastal_mask(S2_filtered['MNDWI'],10)
+    ds_summaries_s2['iswater']=xr.where((ds_summaries_s2['MNDWI']>=0)&(coastal_mask==1),1,
+                                      xr.where((ds_summaries_s2['MNDWI']<0)&(coastal_mask==1),0,np.nan))
+    ds_summaries_s1=ds_summaries_s1.where(~ds_summaries_s2['iswater'].isnull(),np.nan)
+    
+    # reshape arrays for input to sklearn
+    s1_data=ds_summaries_s1.to_array(dim='variable').transpose('x','y','time', 'variable').values
+    data_shape = s1_data.shape
+    data=s1_data.reshape(data_shape[0]*data_shape[1]*data_shape[2],data_shape[3])
+    labels=ds_summaries_s2.iswater.transpose('x','y','time').values.reshape(data_shape[0]*data_shape[1]*data_shape[2],)
+    
+    # remove NaNs and Infinities
+    labels=labels[np.isfinite(data).all(axis=1)]
+    data=data[np.isfinite(data).all(axis=1)]
+    print('Number of samples available: ',data.shape[0])
+    
+    # random sampling max 10000 samples per location
+    if data.shape[0]>10000:
+        rand_indices=random.sample(range(0, data.shape[0]), 10000)
+        labels=labels[rand_indices]
+        data=data[rand_indices]
+        
+    return data,labels
