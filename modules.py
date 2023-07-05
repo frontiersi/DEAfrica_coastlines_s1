@@ -163,18 +163,17 @@ def process_features_s1(ds_s1,filter_size=None,s1_orbit_filtering=True,time_step
     print('Calculating features for Sentinel-1')
     ds_s1_filtered['vv_a_vh']=ds_s1_filtered['vv']+ds_s1_filtered['vh']
     ds_s1_filtered['vv_m_vh']=ds_s1_filtered['vv']-ds_s1_filtered['vh']
-    ds_s1_filtered['vv_d_vh']=ds_s1_filtered['vv']/ds_s1_filtered['vh']
     
     # annual composites
     print('Generate temporal composites...')
     # median
-    ds_summaries_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','vv_d_vh','area']]
+    ds_summaries_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','area']]
                          .resample(time=time_step)
                          .median('time')
                          .compute()
                         )
     # std
-    ds_std_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','vv_d_vh','area']]
+    ds_std_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','area']]
                          .resample(time=time_step)
                          .std('time')
                          .compute()
