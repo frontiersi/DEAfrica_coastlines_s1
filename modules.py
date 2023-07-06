@@ -14,6 +14,7 @@ from scipy.ndimage.measurements import variance
 from skimage.filters import threshold_minimum, threshold_otsu
 from skimage.morphology import binary_erosion,binary_dilation,disk
 import random
+from sklearn.model_selection import train_test_split
 
 def lee_filter(da, size):
     """
@@ -210,7 +211,7 @@ def create_coastal_mask(da,buffer_pixels):
     coastal_mask=xr.apply_ufunc(binary_dilation,coastal_mask.compute(),disk(buffer_pixels))
     return coastal_mask
 
-def collect_training_samples(S2_filtered,ds_summaries_s1,time_step):
+def collect_training_samples(S2_filtered,ds_summaries_s1,time_step,max_samples):
     print('\nCollecting water/non-water samples...')
     # median of S2
     ds_summaries_s2 = (S2_filtered[['MNDWI']]
@@ -236,10 +237,12 @@ def collect_training_samples(S2_filtered,ds_summaries_s1,time_step):
     data=data[np.isfinite(data).all(axis=1)]
     print('Number of samples available: ',data.shape[0])
     
-    # random sampling max 10000 samples per location
-    if data.shape[0]>10000:
-        rand_indices=random.sample(range(0, data.shape[0]), 10000)
-        labels=labels[rand_indices]
-        data=data[rand_indices]
+    # random sampling maximum number of samples per location
+    n_samples=np.min([int(max_samples/2),np.sum(labels==1),np.sum(labels==0)])
+    ind_water=random.sample(sorted(np.where(labels==0)[0]), n_samples)
+    ind_land=random.sample(sorted(np.where(labels==1)[0]), n_samples)
+    rand_indices=ind_water+ind_land
+    labels=labels[rand_indices]
+    data=data[rand_indices]
         
     return data,labels
