@@ -168,20 +168,39 @@ def process_features_s1(ds_s1,filter_size=None,s1_orbit_filtering=True,time_step
     # annual composites
     print('Generate temporal composites...')
     # median
-    ds_summaries_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','area']]
+    ds_summaries_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','area','angle']]
                          .resample(time=time_step)
                          .median('time')
                          .compute()
                         )
+    ds_summaries_s1=ds_summaries_s1.rename({var:var+'_med' for var in list(ds_summaries_s1.data_vars)})
+    
+    # max
+    ds_max_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh']]
+                     .resample(time=time_step)
+                     .max('time')
+                     .compute()
+                    )
+    ds_max_s1=ds_max_s1.rename({var:var+'_max' for var in list(ds_max_s1.data_vars)})
+    
+    # min
+    ds_min_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh']]
+                 .resample(time=time_step)
+                 .min('time')
+                 .compute()
+                )
+    ds_min_s1=ds_min_s1.rename({var:var+'_min' for var in list(ds_min_s1.data_vars)})
+    
     # std
-    ds_std_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh','area']]
+    ds_std_s1 = (ds_s1_filtered[['vh','vv','vv_a_vh','vv_m_vh']]
                          .resample(time=time_step)
                          .std('time')
                          .compute()
                         )
     ds_std_s1=ds_std_s1.rename({var:var+'_std' for var in list(ds_std_s1.data_vars)})
-    # merge median and std
-    ds_summaries_s1=xr.merge([ds_summaries_s1,ds_std_s1])
+    
+    # merge all datasets
+    ds_summaries_s1=xr.merge([ds_summaries_s1,ds_std_s1,ds_max_s1,ds_min_s1])
     
     return ds_summaries_s1
 
@@ -211,17 +230,25 @@ def create_coastal_mask(da,buffer_pixels):
     coastal_mask=xr.apply_ufunc(binary_dilation,coastal_mask.compute(),disk(buffer_pixels))
     return coastal_mask
 
-def collect_training_samples(S2_filtered,ds_summaries_s1,time_step,max_samples):
+def collect_training_samples(ds_summaries_s2,ds_summaries_s1,coastal_mask,max_samples):
+    '''
+    Collect training samples of land and water from Sentinel-1 data at coastal region using classified Sentinel-2 MNDWI
+    Parameters: 
+    ds_summaries_s2: xarray.Dataset
+        Temporarily aggregated Sentinel-2 data
+    ds_summaries_s1: xarray.Dataset
+        Temporarily aggregated Sentinel-1 features
+    coastal_mask:xarray.DataArray 
+        A single time buffered coastal zone mask (0: non-coastal and 1: coastal)
+    max_samples: integer
+        Maximum number of training samples to collect for land/water class
+    
+    Returns:
+        data,labels: Numpy arrays of Sentinel-1 features and land/water class labels
+        ds_summaries_s2['iswater']: xarray.DataArray of land/water classification masked to coastal region
+    '''
     print('\nCollecting water/non-water samples...')
-    # median of S2
-    ds_summaries_s2 = (S2_filtered[['MNDWI']]
-                    .resample(time=time_step)
-                    .median('time')
-                    .compute()
-                        )
     # classs: water (1) and land (0)
-    # excluding pixels that are almost always water (wet frequency >0.8) or land (wet frequeny <0.2)
-    coastal_mask=create_coastal_mask(S2_filtered['MNDWI'],10)
     ds_summaries_s2['iswater']=xr.where((ds_summaries_s2['MNDWI']>=0)&(coastal_mask==1),1,
                                       xr.where((ds_summaries_s2['MNDWI']<0)&(coastal_mask==1),0,np.nan))
     ds_summaries_s1=ds_summaries_s1.where(~ds_summaries_s2['iswater'].isnull(),np.nan)
@@ -245,4 +272,4 @@ def collect_training_samples(S2_filtered,ds_summaries_s1,time_step,max_samples):
     labels=labels[rand_indices]
     data=data[rand_indices]
         
-    return data,labels
+    return data,labels,ds_summaries_s2['iswater']
