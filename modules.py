@@ -226,7 +226,7 @@ def create_coastal_mask(da,buffer_pixels):
     # use 20% ~ 80% wet frequency to identify potential coastal zone
     coastal_mask=(thresholded_ds.mean(dim='time') >= 0.2)&(thresholded_ds.mean(dim='time') <= 0.8)
     # buffering
-    print('\nApplying buffering of {} Sentinel-2 pixels (parameter buffer_pixels)...'.format(buffer_pixels))
+    print('\nApplying buffering of {} Sentinel-2 pixels...'.format(buffer_pixels))
     coastal_mask=xr.apply_ufunc(binary_dilation,coastal_mask.compute(),disk(buffer_pixels))
     return coastal_mask
 
