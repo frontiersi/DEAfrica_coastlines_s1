@@ -68,22 +68,31 @@ def load_s1_by_orbits(dc,query):
     '''
     # load ascending data
     print('\nQuerying and loading Sentinel-1 ascending data...')
-    ds_s1_ascending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
-                             dtype='native',sat_orbit_state='ascending',**query)
-    # add an variable denoting data source
-    ds_s1_ascending['is_ascending']=xr.DataArray(np.ones(len(ds_s1_ascending.time)),
-                                                 dims=('time'),coords={'time': ds_s1_ascending.time})
-    
+    try:
+        ds_s1_ascending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
+                                 dtype='native',sat_orbit_state='ascending',**query)
+        # add an variable denoting data source
+        ds_s1_ascending['is_ascending']=xr.DataArray(np.ones(len(ds_s1_ascending.time)),
+                                                     dims=('time'),coords={'time': ds_s1_ascending.time})
+    except:
+        ds_s1_ascending=None
     # load descending data
     print('\nQuerying and loading Sentinel-1 descending data...')
-    ds_s1_descending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
-                              dtype='native',sat_orbit_state='descending',**query)
-    # add an variable denoting data source
-    ds_s1_descending['is_ascending']=xr.DataArray(np.zeros(len(ds_s1_descending.time)),
-                                                  dims=('time'),coords={'time': ds_s1_descending.time})
-    
+    try:
+        ds_s1_descending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
+                                  dtype='native',sat_orbit_state='descending',**query)
+        # add an variable denoting data source
+        ds_s1_descending['is_ascending']=xr.DataArray(np.zeros(len(ds_s1_descending.time)),
+                                                      dims=('time'),coords={'time': ds_s1_descending.time})
+    except:
+        ds_s1_descending=None
     # merge datasets together
-    ds_s1=xr.concat([ds_s1_ascending,ds_s1_descending],dim='time').sortby('time')
+    if ds_s1_ascending is None:
+        ds_s1=ds_s1_descending
+    elif ds_s1_descending is None:
+        ds_s1=ds_s1_ascending
+    else:
+        ds_s1=xr.concat([ds_s1_ascending,ds_s1_descending],dim='time').sortby('time')
     
     return ds_s1
 
