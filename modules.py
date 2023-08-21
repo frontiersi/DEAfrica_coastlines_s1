@@ -257,16 +257,25 @@ def collect_training_samples(ds_summaries_s2,ds_summaries_s1,coastal_mask,max_sa
         ds_summaries_s2['iswater']: xarray.DataArray of land/water classification masked to coastal region
     '''
     print('\nCollecting water/non-water samples...')
+    
+    # subset s2 data for areas with less Sentinel-1 unavailable for some years
+    dim_time=list(ds_summaries_s1.dims)[0] # whether it is still named as 'time' or changed as 'year'
+    if len(ds_summaries_s1[dim_time])<len(ds_summaries_s2[dim_time]):
+        print('subseting Sentinel-2 data to match Sentinel-1 availability...')
+        ds_summaries_s2=ds_summaries_s2.where(ds_summaries_s2[dim_time]==ds_summaries_s1[dim_time])
+        
     # classs: water (1) and land (0)
     ds_summaries_s2['iswater']=xr.where((ds_summaries_s2['MNDWI']>=0)&(coastal_mask==1),1,
                                       xr.where((ds_summaries_s2['MNDWI']<0)&(coastal_mask==1),0,np.nan))
     ds_summaries_s1=ds_summaries_s1.where(~ds_summaries_s2['iswater'].isnull(),np.nan)
     
     # reshape arrays for input to sklearn
-    s1_data=ds_summaries_s1.to_array(dim='variable').transpose('x','y','time', 'variable').values
+    s1_data=ds_summaries_s1.to_array(dim='variable').transpose('x','y',..., 'variable').values
+#     s1_data=ds_summaries_s1.to_array(dim='variable').transpose('x','y','time', 'variable').values
     data_shape = s1_data.shape
     data=s1_data.reshape(data_shape[0]*data_shape[1]*data_shape[2],data_shape[3])
-    labels=ds_summaries_s2.iswater.transpose('x','y','time').values.reshape(data_shape[0]*data_shape[1]*data_shape[2],)
+    labels=ds_summaries_s2.iswater.transpose('x','y',...).values.reshape(data_shape[0]*data_shape[1]*data_shape[2],)
+#     labels=ds_summaries_s2.iswater.transpose('x','y','time').values.reshape(data_shape[0]*data_shape[1]*data_shape[2],)
     
     # remove NaNs and Infinities
     labels=labels[np.isfinite(data).all(axis=1)]
