@@ -53,7 +53,7 @@ def filter_by_tide_height(ds,tide_centre=0.0):
     ds_filtered = ds_filtered.where(tide_bool)
     return ds_filtered
 
-def load_s1_by_orbits(dc,query):
+def load_s1_by_orbits(dc,query,select_orbit='all'):
     '''
     Function to query and load ascending and descending Sentinel-1 data 
     and add a variable to denote acquisition orbits
@@ -61,39 +61,48 @@ def load_s1_by_orbits(dc,query):
     Parameters:
     dc: connected datacube
     query: a query dictionary to define spatial extent, measurements, time range and spatial resolution
+    select_orbit: String ('ascending'/'descending'/'all'), whether to select only one orbit (descending or ascending) or all observations
     
     Returns:
     Queried dataset with variable 'is_ascending' added to denote orbit path
     
     '''
-    # load ascending data
-    print('\nQuerying and loading Sentinel-1 ascending data...')
-    try:
-        ds_s1_ascending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
-                                 dtype='native',sat_orbit_state='ascending',**query)
-        # add an variable denoting data source
-        ds_s1_ascending['is_ascending']=xr.DataArray(np.ones(len(ds_s1_ascending.time)),
-                                                     dims=('time'),coords={'time': ds_s1_ascending.time})
-    except:
-        ds_s1_ascending=None
-    # load descending data
-    print('\nQuerying and loading Sentinel-1 descending data...')
-    try:
-        ds_s1_descending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
-                                  dtype='native',sat_orbit_state='descending',**query)
-        # add an variable denoting data source
-        ds_s1_descending['is_ascending']=xr.DataArray(np.zeros(len(ds_s1_descending.time)),
-                                                      dims=('time'),coords={'time': ds_s1_descending.time})
-    except:
-        ds_s1_descending=None
-    # merge datasets together
-    if ds_s1_ascending is None:
-        ds_s1=ds_s1_descending
-    elif ds_s1_descending is None:
-        ds_s1=ds_s1_ascending
+    if select_orbit=='all':
+        # load ascending data
+        print('\nQuerying and loading Sentinel-1 ascending data...')
+        try:
+            ds_s1_ascending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
+                                     dtype='native',sat_orbit_state='ascending',**query)
+            # add an variable denoting data source
+            ds_s1_ascending['is_ascending']=xr.DataArray(np.ones(len(ds_s1_ascending.time)),
+                                                         dims=('time'),coords={'time': ds_s1_ascending.time})
+        except:
+            ds_s1_ascending=None
+
+        # load descending data
+        print('\nQuerying and loading Sentinel-1 descending data...')
+        try:
+            ds_s1_descending=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
+                                      dtype='native',sat_orbit_state='descending',**query)
+            # add an variable denoting data source
+            ds_s1_descending['is_ascending']=xr.DataArray(np.zeros(len(ds_s1_descending.time)),
+                                                          dims=('time'),coords={'time': ds_s1_descending.time})
+        except:
+            ds_s1_descending=None
+        # merge datasets together
+        if ds_s1_ascending is None:
+            ds_s1=ds_s1_descending
+        elif ds_s1_descending is None:
+            ds_s1=ds_s1_ascending
+        else:
+            ds_s1=xr.concat([ds_s1_ascending,ds_s1_descending],dim='time').sortby('time')
     else:
-        ds_s1=xr.concat([ds_s1_ascending,ds_s1_descending],dim='time').sortby('time')
-    
+        print('\nQuerying and loading Sentinel-1 ',select_orbit,' data...')
+        try:
+            ds_s1=load_ard(dc=dc,products=['s1_rtc'],resampling='bilinear',align=(10, 10),
+                         dtype='native',sat_orbit_state=select_orbit,**query)
+        except:
+            ds_s1=None
     return ds_s1
 
 def filter_obs_by_orbit(ds_s1):
@@ -109,7 +118,7 @@ def filter_obs_by_orbit(ds_s1):
     ds_s1: xarray.Dataset
         Time-series observations of Sentinel-1 data, 
         with two required variables: 'is_ascending' denoting orbit path and 'mask' to identify acquisition exent
-    
+        
     Returns:
     ds_s1_filtered: xarray.Dataset
         Filtered dataset
@@ -128,7 +137,7 @@ def filter_obs_by_orbit(ds_s1):
     
     return ds_s1_filtered
 
-def process_features_s1(ds_s1,filter_size=None,s1_orbit_filtering=True,time_step='1Y'):
+def process_features_s1(ds_s1,filter_size=None,s1_orbit_filtering=True,time_step='1Y',selected_orbit='all'):
     '''
     Function to implement preprocessing and features generation on Sentinel-1 data
     preprocessing includes speckle filtering (optional), filtering observations by orbit (optional) and conversion to dB
@@ -143,7 +152,9 @@ def process_features_s1(ds_s1,filter_size=None,s1_orbit_filtering=True,time_step
         Whether to filter Sentinel-1 observations by orbit
     time_step: string
         time step used to generate temporal composite
-        
+    selected_orbit: String ('ascending'/'descending'/'all')
+        whether only one or boths orbit (descending or ascending) were selected when data was queried
+    
     Returns:
         xarray.Dataset
         Preprocessed Sentinel-1 data
@@ -162,7 +173,7 @@ def process_features_s1(ds_s1,filter_size=None,s1_orbit_filtering=True,time_step
         ds_s1_filtered['vh'] = ds_s1_filtered.vh.where(ds_s1_filtered.vh!=0,np.nan)
     
     # filter observations by orbit if required
-    if s1_orbit_filtering:
+    if s1_orbit_filtering and (selected_orbit=='all'):
         ds_s1_filtered=filter_obs_by_orbit(ds_s1_filtered)
 
     # Scale to plot data in decibels
@@ -270,11 +281,11 @@ def collect_training_samples(ds_summaries_s2,ds_summaries_s1,coastal_mask,max_sa
     ds_summaries_s1=ds_summaries_s1.where(~ds_summaries_s2['iswater'].isnull(),np.nan)
     
     # reshape arrays for input to sklearn
-    s1_data=ds_summaries_s1.to_array(dim='variable').transpose('x','y',..., 'variable').values
+    s1_data=ds_summaries_s1.to_array(dim='variable').transpose('x','y',dim_time, 'variable').values
 #     s1_data=ds_summaries_s1.to_array(dim='variable').transpose('x','y','time', 'variable').values
     data_shape = s1_data.shape
     data=s1_data.reshape(data_shape[0]*data_shape[1]*data_shape[2],data_shape[3])
-    labels=ds_summaries_s2.iswater.transpose('x','y',...).values.reshape(data_shape[0]*data_shape[1]*data_shape[2],)
+    labels=ds_summaries_s2.iswater.transpose('x','y',dim_time).values.reshape(data_shape[0]*data_shape[1]*data_shape[2],)
 #     labels=ds_summaries_s2.iswater.transpose('x','y','time').values.reshape(data_shape[0]*data_shape[1]*data_shape[2],)
     
     # remove NaNs and Infinities
@@ -283,7 +294,7 @@ def collect_training_samples(ds_summaries_s2,ds_summaries_s1,coastal_mask,max_sa
     print('Number of samples available: ',data.shape[0])
     
     # random sampling maximum number of samples per location
-    n_samples=np.min([int(max_samples/2),np.sum(labels==1),np.sum(labels==0)])
+    n_samples=np.min([int(max_samples),np.sum(labels==1),np.sum(labels==0)])
     ind_water=random.sample(sorted(np.where(labels==0)[0]), n_samples)
     ind_land=random.sample(sorted(np.where(labels==1)[0]), n_samples)
     rand_indices=ind_water+ind_land
